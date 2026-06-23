@@ -361,7 +361,7 @@ if(trackerId){
 
     document.getElementById('jf-join').onclick = async () => {
       const val = document.getElementById('jf-join-id').value.trim();
-      const match = val.match(/#?[a-z0-9]{8,})$/i);
+      const match = val.match(/#?([a-z0-9]{8,})$/i);
       const err = document.getElementById('jf-join-err');
       if(!match){ err.textContent = 'Paste the full shared link or just the number ID.'; err.style.display='block'; return; }
       const id = match[1];
