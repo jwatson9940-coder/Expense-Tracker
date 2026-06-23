@@ -134,7 +134,29 @@
 
 <div id="jf-root"><div class="jf-loading">Loading…</div></div>
 
-<script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js";
+import {
+  getFirestore,
+  doc,
+  getDoc,
+  setDoc,
+  onSnapshot
+} from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBoMk2lTKnc6Xbpal37GaMVqMxG8dIvv5o",
+  authDomain: "expense-tracker-65e10.firebaseapp.com",
+  projectId: "expense-tracker-65e10",
+  storageBucket: "expense-tracker-65e10.firebasestorage.app",
+  messagingSenderId: "481425463915",
+  appId: "1:481425463915:web:d9584631a6e58f0d0e6f2e",
+  measurementId: "G-FHYXDLR1C9"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+
 (function(){
   const CATS = [
     {id:'food',       name:'Food & Snacks',   color:'#E2725A'},
@@ -168,73 +190,79 @@
 
   // ---- Storage: auto-detects context ----
   // Inside Claude.ai preview → window.storage (shared, works in preview)
-  // Published standalone link → JSONBlob (cross-device) + localStorage (cache)
+  // Published standalone link → Firebase (cross-device) + localStorage (cache)
   const IN_CLAUDE = typeof window.storage !== 'undefined';
-  const BLOB_API = 'https://jsonblob.com/api/jsonBlob';
-  let blobId = null;
+  let trackerId = null;
   let saveTimeout = null;
+  let unsubscribeTracker = null;
 
   function cloudData(){
     return { settings:state.settings, catBudgets:state.catBudgets, expenses:state.expenses, fund:state.fund };
   }
 
-  function getBlobIdFromEnv(){
-    try{
-      const h = window.location.hash.replace('#','');
-      if(h && /^\d{10,}$/.test(h)) return h;
-      return localStorage.getItem('et_blob_id') || null;
-    }catch(e){ return null; }
-  }
+function getTrackerIdFromEnv(){
+  try{
+    const h = window.location.hash.replace('#','');
+    if(h) return h;
+    return localStorage.getItem('et_tracker_id') || null;
+  }catch(e){ return null; }
+}
 
-  function setHash(id){
-    try{ history.replaceState(null,'','#'+id); }catch(e){}
-    try{ localStorage.setItem('et_blob_id', id); }catch(e){}
-  }
+function setHash(id){
+  try{ history.replaceState(null,'','#'+id); }catch(e){}
+  try{ localStorage.setItem('et_tracker_id', id); }catch(e){}
+}
 
-  function getShareUrl(){
-    if(IN_CLAUDE) return '(open the published link to get a shareable URL)';
-    return window.location.href.split('#')[0]+'#'+blobId;
-  }
+function getShareUrl(){
+  return window.location.href.split('#')[0] + '#' + trackerId;
+}
 
-  // ---- JSONBlob helpers ----
-  async function createBlob(){
-    const res = await fetch(BLOB_API, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(cloudData())
-    });
-    if(!res.ok) throw new Error(`HTTP ${res.status}`);
-    // Try Location header first, then res.url
-    const loc = res.headers.get('Location') || res.url || '';
-    const parts = loc.split('/').filter(Boolean);
-    const id = parts[parts.length-1];
-    if(!id || !/^\d+$/.test(id)) throw new Error('Could not read blob ID from response');
-    return id;
-  }
+function makeTrackerId(){
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+}
 
-  async function fetchBlob(id){
-    const res = await fetch(`${BLOB_API}/${id}`);
-    if(!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
-  }
+async function createTracker(){
+  trackerId = makeTrackerId();
+  await setDoc(doc(db, "trackers", trackerId), cloudData());
+  return trackerId;
+}
 
-  async function pushBlob(){
-    if(!blobId) return;
-    try{
-      // Also cache locally
-      try{ localStorage.setItem('et_cache', JSON.stringify(cloudData())); }catch(e){}
-      await fetch(`${BLOB_API}/${blobId}`, {
-        method:'PUT',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify(cloudData())
-      });
-    }catch(e){ console.error('Cloud save failed',e); }
+async function fetchTracker(id){
+  const snap = await getDoc(doc(db, "trackers", id));
+  if(!snap.exists()) throw new Error("Tracker not found");
+  return snap.data();
+}
+
+async function pushTracker(){
+  if(!trackerId) return;
+  try{
+    await setDoc(doc(db, "trackers", trackerId), cloudData());
+  }catch(e){
+    console.error('Cloud save failed', e);
   }
+}
+
+function listenToTracker(id){
+  if(unsubscribeTracker) unsubscribeTracker();
+
+  unsubscribeTracker = onSnapshot(doc(db, "trackers", id), (snap) => {
+    if(!snap.exists()) return;
+
+    const data = snap.data();
+
+    if(data.settings) state.settings = data.settings;
+    if(data.catBudgets) state.catBudgets = data.catBudgets;
+    if(data.expenses) state.expenses = data.expenses;
+    if(data.fund) state.fund = data.fund;
+
+    render();
+  });
+}
 
   function scheduleSave(){
     if(IN_CLAUDE){ saveClaudeStorage(); return; }
     clearTimeout(saveTimeout);
-    saveTimeout = setTimeout(pushBlob, 800);
+    saveTimeout = setTimeout(pushTracker, 500);
   }
 
   // ---- window.storage helpers (Claude context) ----
@@ -264,42 +292,31 @@
       return;
     }
 
-    // Published standalone — use JSONBlob
-    blobId = getBlobIdFromEnv();
+    // Published standalone — use Firestore
+trackerId = getTrackerIdFromEnv();
 
-    if(blobId){
-      root.innerHTML = `<div class="jf-loading">Loading your data…</div>`;
-      try{
-        const data = await fetchBlob(blobId);
-        if(data.settings) state.settings = data.settings;
-        if(data.catBudgets) state.catBudgets = data.catBudgets;
-        if(data.expenses) state.expenses = data.expenses;
-        if(data.fund) state.fund = data.fund;
-        setHash(blobId);
-        render();
-      }catch(e){
-        // Try local cache before giving up
-        try{
-          const cached = localStorage.getItem('et_cache');
-          if(cached){
-            const data = JSON.parse(cached);
-            if(data.settings) state.settings = data.settings;
-            if(data.catBudgets) state.catBudgets = data.catBudgets;
-            if(data.expenses) state.expenses = data.expenses;
-            if(data.fund) state.fund = data.fund;
-            render();
-            return;
-          }
-        }catch(e2){}
-        blobId = null;
-        try{ localStorage.removeItem('et_blob_id'); }catch(e2){}
-        renderSetup('Could not load that data — the link may be invalid.');
-      }
-    } else {
-      renderSetup(null);
-    }
+if(trackerId){
+  root.innerHTML = `<div class="jf-loading">Loading your data…</div>`;
+  try{
+    const data = await fetchTracker(trackerId);
+
+    if(data.settings) state.settings = data.settings;
+    if(data.catBudgets) state.catBudgets = data.catBudgets;
+    if(data.expenses) state.expenses = data.expenses;
+    if(data.fund) state.fund = data.fund;
+
+    setHash(trackerId);
+    listenToTracker(trackerId);
+    render();
+  }catch(e){
+    trackerId = null;
+    try{ localStorage.removeItem('et_tracker_id'); }catch(e2){}
+    renderSetup('Could not load that tracker — the link may be invalid.');
   }
-
+} else {
+  renderSetup(null);
+}
+  }
   function renderSetup(errorMsg){
     const root = document.getElementById('jf-root');
     root.innerHTML = `
@@ -331,8 +348,9 @@
       const err = document.getElementById('jf-create-err');
       btn.textContent = 'Creating…'; btn.disabled = true; err.style.display='none';
       try{
-        blobId = await createBlob();
-        setHash(blobId);
+       trackerId = await createTracker();
+       listenToTracker(trackerId);
+        setHash(trackerId);
         render();
       }catch(e){
         btn.textContent = 'Create new tracker'; btn.disabled = false;
@@ -343,20 +361,21 @@
 
     document.getElementById('jf-join').onclick = async () => {
       const val = document.getElementById('jf-join-id').value.trim();
-      const match = val.match(/(\d{10,})/);
+      const match = val.match(/#?[a-z0-9]{8,})$/i);
       const err = document.getElementById('jf-join-err');
       if(!match){ err.textContent = 'Paste the full shared link or just the number ID.'; err.style.display='block'; return; }
       const id = match[1];
       const btn = document.getElementById('jf-join');
       btn.textContent = 'Joining…'; btn.disabled = true; err.style.display='none';
       try{
-        const data = await fetchBlob(id);
-        blobId = id;
+        const data = await fetchTracker(id);
+        trackerId = id;
         if(data.settings) state.settings = data.settings;
         if(data.catBudgets) state.catBudgets = data.catBudgets;
         if(data.expenses) state.expenses = data.expenses;
         if(data.fund) state.fund = data.fund;
-        setHash(blobId);
+        setHash(trackerId);
+        listenToTracker(trackerId);
         render();
       }catch(e){
         btn.textContent = 'Join'; btn.disabled = false;
@@ -744,7 +763,7 @@
     if(refreshBtn) refreshBtn.onclick=async()=>{
       refreshBtn.textContent='↻ Syncing…'; refreshBtn.disabled=true;
       try{
-        const data=await fetchBlob(blobId);
+        const data=await fetchTracker(trackerId);
         if(data.settings) state.settings=data.settings;
         if(data.catBudgets) state.catBudgets=data.catBudgets;
         if(data.expenses) state.expenses=data.expenses;
