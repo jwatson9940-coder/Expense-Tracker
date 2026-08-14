@@ -233,10 +233,10 @@ const db = getFirestore(app);
   const DEFAULT_CAT_BUDGETS = {food:80,groceries:60,eatingout:50,transport:30,entertainment:30,subscriptions:20,shopping:0,other:10};
 
   let state = {
-    settings: {names:['You','Partner'], tripDate:'2026-11-15', milestoneLabel:'Busselton'},
+    settings: {names:['You','Partner'], tripDate:'2026-11-15', milestoneLabel:'Busselton', autoFundStartMonth:monthKey(new Date())},
     catBudgets: [{...DEFAULT_CAT_BUDGETS},{...DEFAULT_CAT_BUDGETS}],
     expenses: [], fund: [],
-    person:0, fundPerson:0, tab:'overview',
+    person:0, tab:'overview',
     viewMonth: monthKey(new Date()),
   };
 
@@ -296,7 +296,7 @@ const db = getFirestore(app);
 
   function listenToTracker(id){
     if(unsubscribeTracker) unsubscribeTracker();
-    unsubscribeTracker = onSnapshot(doc(db, 'trackers', id), (snap)=>{
+    unsubscribeTracker = onSnapshot(doc(db, 'trackers', id), async (snap)=>{
       if(!snap.exists()) return;
       const data = snap.data();
       if(data.settings)   state.settings   = data.settings;
@@ -306,6 +306,7 @@ const db = getFirestore(app);
       }
       if(data.expenses)   state.expenses   = data.expenses;
       if(data.fund)       state.fund       = data.fund;
+      await syncAutoFund();
       render();
     });
   }
@@ -343,6 +344,7 @@ const db = getFirestore(app);
       }catch(e){}
       try{ const ex=await window.storage.get('expenses',true);  if(ex&&ex.value) state.expenses=JSON.parse(ex.value); }catch(e){}
       try{ const fd=await window.storage.get('fund',true);      if(fd&&fd.value) state.fund=JSON.parse(fd.value); }catch(e){}
+      await syncAutoFund();
       render(); return;
     }
 
@@ -359,6 +361,7 @@ const db = getFirestore(app);
         if(data.expenses)   state.expenses   = data.expenses;
         if(data.fund)       state.fund       = data.fund;
         setHash(trackerId);
+        await syncAutoFund();
         listenToTracker(trackerId);
         render();
       }catch(e){
@@ -430,6 +433,7 @@ const db = getFirestore(app);
         if(data.expenses)   state.expenses   = data.expenses;
         if(data.fund)       state.fund       = data.fund;
         setHash(trackerId);
+        await syncAutoFund();
         listenToTracker(trackerId);
         render();
       }catch(e){
@@ -446,7 +450,57 @@ const db = getFirestore(app);
     set.add(state.viewMonth); set.add(monthKey(new Date()));
     return Array.from(set).sort();
   }
-  function fundTotal(){ return state.fund.reduce((s,f)=>s+f.amount,0); }
+  function fundTotal(){ return state.fund.reduce((s,f)=>s+(Number(f.amount)||0),0); }
+
+  function monthEndDate(mk){
+    const [y,m]=mk.split('-').map(Number);
+    const day=new Date(y,m,0).getDate();
+    return `${y}-${String(m).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+  }
+
+  async function syncAutoFund(){
+    const currentMk=monthKey(new Date());
+    let changed=false;
+
+    // Existing trackers start automatic rollover from the month they first run this version.
+    if(!state.settings.autoFundStartMonth){
+      state.settings.autoFundStartMonth=currentMk;
+      changed=true;
+    }
+
+    let mk=state.settings.autoFundStartMonth;
+    let guard=0;
+    while(mk<currentMk && guard<240){
+      for(let person=0; person<2; person++){
+        const id=`auto-${mk}-${person}`;
+        const idx=state.fund.findIndex(f=>f.id===id);
+        const existing=idx>=0?state.fund[idx]:null;
+        const spent=expensesForMonth(mk).filter(e=>e.person===person).reduce((sum,e)=>sum+e.amount,0);
+        // Once a month closes, keep its budget snapshot fixed even if budgets change later.
+        const budget=existing&&Number.isFinite(existing.budget)?existing.budget:catBudgetTotal(person);
+        const amount=Math.max(0,budget-spent);
+        const next={
+          id, amount, date:monthEndDate(mk), person, auto:true, month:mk,
+          budget, spent, note:`Unused ${monthLabel(mk)} budget`
+        };
+
+        if(existing){
+          if(existing.amount!==next.amount || existing.spent!==next.spent || existing.budget!==next.budget || !existing.auto){
+            state.fund[idx]={...existing,...next};
+            changed=true;
+          }
+        }else{
+          state.fund.push(next);
+          changed=true;
+        }
+      }
+      mk=shiftMonth(mk,1);
+      guard++;
+    }
+
+    if(changed) await saveFund();
+  }
+
   function daysUntilTrip(){
     const today=new Date(); today.setHours(0,0,0,0);
     const trip=new Date(state.settings.tripDate+'T00:00:00');
@@ -731,46 +785,56 @@ const db = getFirestore(app);
   function renderFund(names){
     const ml=state.settings.milestoneLabel||'Trip';
     const total=fundTotal();
+    const mk=monthKey(new Date());
+    const monthExp=expensesForMonth(mk);
+    const projected=[0,1].map(i=>{
+      const spent=monthExp.filter(e=>e.person===i).reduce((sum,e)=>sum+e.amount,0);
+      return Math.max(0,catBudgetTotal(i)-spent);
+    });
+    const projectedTotal=projected[0]+projected[1];
     const sorted=state.fund.slice().sort((a,b)=>b.date.localeCompare(a.date));
-    const byPerson=[0,1].map(i=>state.fund.filter(f=>f.person===i).reduce((s,f)=>s+f.amount,0));
+    const rolledByPerson=[0,1].map(i=>state.fund.filter(f=>f.auto&&f.person===i).reduce((sum,f)=>sum+(Number(f.amount)||0),0));
+    const manualByPerson=[0,1].map(i=>state.fund.filter(f=>!f.auto&&f.person===i).reduce((sum,f)=>sum+(Number(f.amount)||0),0));
+    const manualTotal=manualByPerson[0]+manualByPerson[1];
+    const autoStart=state.settings.autoFundStartMonth||mk;
+
     return `<div class="jf-grid">
       <div class="jf-card" style="grid-column:1/-1;">
         <h2>${ml} Fund</h2>
         <div class="jf-fund-balance"><b>${fmtShort(total)}</b><span>total saved toward the trip</span></div>
         <div class="jf-streak-row">
-          <span class="jf-streak-pill">${names[0]} contributed: <b>${fmtShort(byPerson[0])}</b></span>
-          <span class="jf-streak-pill">${names[1]} contributed: <b>${fmtShort(byPerson[1])}</b></span>
+          <span class="jf-streak-pill">${names[0]} rolled over: <b>${fmtShort(rolledByPerson[0])}</b></span>
+          <span class="jf-streak-pill">${names[1]} rolled over: <b>${fmtShort(rolledByPerson[1])}</b></span>
         </div>
+        ${manualTotal>0?`<p style="font-size:11.5px;color:var(--text-faint);margin:10px 0 0;line-height:1.5;">Previous manual contributions still included in the fund total: ${names[0]} ${fmtShort(manualByPerson[0])} · ${names[1]} ${fmtShort(manualByPerson[1])}.</p>`:''}
       </div>
-      <div class="jf-card">
-        <h2>Add to the fund</h2>
-        <div class="jf-form">
-          <div class="jf-field full"><label>Who's contributing</label>
-            <div class="jf-toggle">
-              <button type="button" id="jf-fp0" class="${state.fundPerson===0?'active':''}">${names[0]}</button>
-              <button type="button" id="jf-fp1" class="${state.fundPerson===1?'active':''}">${names[1]}</button>
-            </div>
-          </div>
-          <div class="jf-field"><label>Amount (AUD)</label><input type="number" id="jf-fund-amt" min="0" step="0.01" placeholder="0.00"></div>
-          <div class="jf-field"><label>Date</label><input type="date" id="jf-fund-date" value="${new Date().toISOString().slice(0,10)}"></div>
-          <div class="jf-field full"><label>Note (optional)</label><input type="text" id="jf-fund-note" placeholder="e.g. leftover from payday"></div>
-          <div class="full" style="margin-top:4px;"><button class="jf-btn jf-btn-primary" id="jf-fund-add">Add contribution</button></div>
+
+      <div class="jf-card" style="grid-column:1/-1;">
+        <h2>Automatic monthly rollover <span class="tag">${monthLabel(mk)}</span></h2>
+        <div class="jf-fund-balance"><b>${fmtShort(projectedTotal)}</b><span>currently left in this month's budgets</span></div>
+        <div class="jf-streak-row">
+          <span class="jf-streak-pill">${names[0]} projected rollover: <b>${fmtShort(projected[0])}</b></span>
+          <span class="jf-streak-pill">${names[1]} projected rollover: <b>${fmtShort(projected[1])}</b></span>
         </div>
+        <p style="font-size:12.5px;color:var(--text-soft);margin:12px 0 0;line-height:1.6;">
+          When the month ends, each person's unused budget is added to the ${ml} Fund automatically. Overspending contributes $0 rather than reducing the fund. Automatic rollover starts from ${monthLabel(autoStart)}.
+        </p>
       </div>
-      <div class="jf-card">
+
+      <div class="jf-card" style="grid-column:1/-1;">
         <h2>Contribution history</h2>
-        ${sorted.length===0?'<p class="jf-empty">No contributions yet — add the first one.</p>':
+        ${sorted.length===0?'<p class="jf-empty">No completed-month rollovers or earlier contributions yet.</p>':
           sorted.map(f=>`
             <div class="jf-tx">
               <div class="jf-tx-left">
                 <div>
-                  <div>${f.note?f.note:'Fund contribution'}</div>
-                  <div class="jf-tx-meta">${names[f.person]} · ${new Date(f.date+'T00:00:00').toLocaleDateString(undefined,{day:'numeric',month:'short'})}</div>
+                  <div>${f.auto?`Automatic leftover — ${monthLabel(f.month)}`:(f.note?f.note:'Fund contribution')}</div>
+                  <div class="jf-tx-meta">${names[f.person]} · ${f.auto?`budget ${fmtShort(f.budget)} · spent ${fmtShort(f.spent)}`:new Date(f.date+'T00:00:00').toLocaleDateString(undefined,{day:'numeric',month:'short'})}</div>
                 </div>
               </div>
               <div style="display:flex;align-items:center;gap:6px;">
                 <span class="jf-tx-amt pos">+${fmt(f.amount)}</span>
-                <button class="jf-tx-del-fund" data-id="${f.id}">&times;</button>
+                ${f.auto?'':`<button class="jf-tx-del-fund" data-id="${f.id}">&times;</button>`}
               </div>
             </div>
           `).join('')}
@@ -797,7 +861,7 @@ const db = getFirestore(app);
         <button class="jf-btn jf-btn-primary" id="jf-copy-link" style="width:100%;">Copy link</button>
         <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border);">
           <p style="font-weight:700;font-size:13px;margin:0 0 6px;">How budgets work</p>
-          <p style="font-size:12.5px;color:var(--text-soft);margin:0;line-height:1.6;">Your monthly budget is the sum of your category budgets. Each limit applies to each of you individually — head to the <b style="color:var(--text);">Budgets</b> tab to adjust.</p>
+          <p style="font-size:12.5px;color:var(--text-soft);margin:0;line-height:1.6;">Your monthly budget is the sum of your category budgets. Each limit applies to each of you individually. At the end of each month, any unused amount is automatically rolled into the milestone fund — head to the <b style="color:var(--text);">Budgets</b> tab to adjust.</p>
         </div>
       </div>
     </div>`;
@@ -823,9 +887,6 @@ const db = getFirestore(app);
 
     const p0=document.getElementById('jf-p0'); if(p0) p0.onclick=()=>{ state.person=0; render(); };
     const p1=document.getElementById('jf-p1'); if(p1) p1.onclick=()=>{ state.person=1; render(); };
-    const fp0=document.getElementById('jf-fp0'); if(fp0) fp0.onclick=()=>{ state.fundPerson=0; render(); };
-    const fp1=document.getElementById('jf-fp1'); if(fp1) fp1.onclick=()=>{ state.fundPerson=1; render(); };
-
     const addBtn=document.getElementById('jf-add');
     if(addBtn) addBtn.onclick=async()=>{
       const amt=parseFloat(document.getElementById('jf-amt').value);
@@ -835,22 +896,20 @@ const db = getFirestore(app);
       const note=document.getElementById('jf-note').value.trim();
       state.expenses.push({id:Date.now()+'-'+Math.random().toString(36).slice(2,7),amount:amt,cat,date,note,person:state.person});
       state.viewMonth=date.slice(0,7);
+      await syncAutoFund();
       await saveExpenses();
+      render();
     };
 
     root.querySelectorAll('.jf-tx-del').forEach(btn=>{
-      btn.onclick=async()=>{ state.expenses=state.expenses.filter(e=>e.id!==btn.dataset.id); await saveExpenses(); };
+      btn.onclick=async()=>{
+        state.expenses=state.expenses.filter(e=>e.id!==btn.dataset.id);
+        await syncAutoFund();
+        await saveExpenses();
+        render();
+      };
     });
 
-    const fundAddBtn=document.getElementById('jf-fund-add');
-    if(fundAddBtn) fundAddBtn.onclick=async()=>{
-      const amt=parseFloat(document.getElementById('jf-fund-amt').value);
-      if(!amt||amt<=0){ document.getElementById('jf-fund-amt').focus(); return; }
-      const date=document.getElementById('jf-fund-date').value||new Date().toISOString().slice(0,10);
-      const note=document.getElementById('jf-fund-note').value.trim();
-      state.fund.push({id:Date.now()+'-'+Math.random().toString(36).slice(2,7),amount:amt,date,note,person:state.fundPerson});
-      await saveFund();
-    };
 
     root.querySelectorAll('.jf-tx-del-fund').forEach(btn=>{
       btn.onclick=async()=>{ state.fund=state.fund.filter(f=>f.id!==btn.dataset.id); await saveFund(); };
@@ -882,6 +941,7 @@ const db = getFirestore(app);
         const next={...state.catBudgets[personIdx]};
         root.querySelectorAll(`.jf-cb[data-person="${personIdx}"]`).forEach(inp=>{ next[inp.dataset.cat]=parseFloat(inp.value)||0; });
         state.catBudgets[personIdx]=next;
+        await syncAutoFund();
         await saveCatBudgets(); render();
       };
     });
