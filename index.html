@@ -106,6 +106,8 @@
   .jf-btn{border:none;border-radius:10px;padding:10px 16px;font-weight:700;font-size:13.5px;cursor:pointer;font-family:'Inter',sans-serif;}
   .jf-btn-primary{background:var(--accent);color:#0B0D10;}
   .jf-btn-primary:hover{opacity:.9;}
+  .jf-btn-danger{background:rgba(226,114,90,.15);color:var(--warn);border:1px solid var(--warn);}
+  .jf-btn-danger:hover{background:var(--warn);color:#0B0D10;}
   .jf-tx{display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--border-soft);font-size:13px;}
   .jf-tx:last-child{border-bottom:none;}
   .jf-tx-left{display:flex;align-items:center;gap:9px;}
@@ -114,6 +116,8 @@
   .jf-tx-amt.pos{color:var(--accent);}
   .jf-tx-del{background:none;border:none;color:var(--text-faint);cursor:pointer;font-size:15px;padding:2px 6px;}
   .jf-tx-del:hover{color:var(--warn);}
+  .jf-tx-del-fund{background:none;border:none;color:var(--text-faint);cursor:pointer;font-size:15px;padding:2px 6px;}
+  .jf-tx-del-fund:hover{color:var(--warn);}
   .jf-monthnav{display:flex;align-items:center;gap:8px;margin-bottom:16px;}
   .jf-monthnav button{background:var(--surface-2);border:1px solid var(--border);color:var(--text);border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:14px;}
   .jf-monthnav select{font-family:'Inter',sans-serif;font-weight:600;font-size:13px;border:1px solid var(--border);border-radius:9px;padding:7px 10px;background:var(--surface-2);color:var(--text);}
@@ -236,6 +240,7 @@ const db = getFirestore(app);
     settings: {names:['You','Partner'], tripDate:'2026-11-15', milestoneLabel:'Busselton', autoFundStartMonth:monthKey(new Date())},
     catBudgets: [{...DEFAULT_CAT_BUDGETS},{...DEFAULT_CAT_BUDGETS}],
     expenses: [], fund: [],
+    fundHistory: [],
     person:0, tab:'overview',
     viewMonth: monthKey(new Date()),
   };
@@ -251,7 +256,13 @@ const db = getFirestore(app);
   let unsubscribeTracker = null;
 
   function cloudData(){
-    return { settings:state.settings, catBudgets:state.catBudgets, expenses:state.expenses, fund:state.fund };
+    return {
+      settings:state.settings,
+      catBudgets:state.catBudgets,
+      expenses:state.expenses,
+      fund:state.fund,
+      fundHistory:state.fundHistory
+    };
   }
 
   function getTrackerIdFromEnv(){
@@ -267,7 +278,6 @@ const db = getFirestore(app);
     try{ localStorage.setItem('et_tracker_id', id); }catch(e){}
   }
 
-  // FIX: getShareUrl was missing — added here
   function getShareUrl(){
     return window.location.href.split('#')[0] + '#' + trackerId;
   }
@@ -304,8 +314,9 @@ const db = getFirestore(app);
         const cb=data.catBudgets;
         state.catBudgets=Array.isArray(cb)?cb:[{...cb},{...cb}];
       }
-      if(data.expenses)   state.expenses   = data.expenses;
-      if(data.fund)       state.fund       = data.fund;
+      if(data.expenses)    state.expenses    = data.expenses;
+      if(data.fund)        state.fund        = data.fund;
+      if(data.fundHistory) state.fundHistory = data.fundHistory;
       await syncAutoFund();
       render();
     });
@@ -318,10 +329,11 @@ const db = getFirestore(app);
   }
 
   async function saveClaudeStorage(){
-    try{ await window.storage.set('settings',   JSON.stringify(state.settings),   true); }catch(e){}
-    try{ await window.storage.set('catBudgets', JSON.stringify(state.catBudgets), true); }catch(e){}
-    try{ await window.storage.set('expenses',   JSON.stringify(state.expenses),   true); }catch(e){}
-    try{ await window.storage.set('fund',       JSON.stringify(state.fund),       true); }catch(e){}
+    try{ await window.storage.set('settings',    JSON.stringify(state.settings),    true); }catch(e){}
+    try{ await window.storage.set('catBudgets',  JSON.stringify(state.catBudgets),  true); }catch(e){}
+    try{ await window.storage.set('expenses',    JSON.stringify(state.expenses),    true); }catch(e){}
+    try{ await window.storage.set('fund',        JSON.stringify(state.fund),        true); }catch(e){}
+    try{ await window.storage.set('fundHistory', JSON.stringify(state.fundHistory), true); }catch(e){}
   }
 
   async function saveSettings()   { scheduleSave(); }
@@ -344,6 +356,7 @@ const db = getFirestore(app);
       }catch(e){}
       try{ const ex=await window.storage.get('expenses',true);  if(ex&&ex.value) state.expenses=JSON.parse(ex.value); }catch(e){}
       try{ const fd=await window.storage.get('fund',true);      if(fd&&fd.value) state.fund=JSON.parse(fd.value); }catch(e){}
+      try{ const fh=await window.storage.get('fundHistory',true); if(fh&&fh.value) state.fundHistory=JSON.parse(fh.value); }catch(e){}
       await syncAutoFund();
       render(); return;
     }
@@ -358,8 +371,9 @@ const db = getFirestore(app);
           const cb=data.catBudgets;
           state.catBudgets=Array.isArray(cb)?cb:[{...cb},{...cb}];
         }
-        if(data.expenses)   state.expenses   = data.expenses;
-        if(data.fund)       state.fund       = data.fund;
+        if(data.expenses)    state.expenses    = data.expenses;
+        if(data.fund)        state.fund        = data.fund;
+        if(data.fundHistory) state.fundHistory = data.fundHistory;
         setHash(trackerId);
         await syncAutoFund();
         listenToTracker(trackerId);
@@ -418,7 +432,6 @@ const db = getFirestore(app);
 
     document.getElementById('jf-join').onclick = async () => {
       const val = document.getElementById('jf-join-id').value.trim();
-      // FIX: corrected regex — was missing opening ( inside match()
       const match = val.match(/#?([a-z0-9]{8,})$/i);
       const err = document.getElementById('jf-join-err');
       if(!match){ err.textContent = 'Paste the full shared link or just the tracker ID.'; err.style.display='block'; return; }
@@ -429,9 +442,13 @@ const db = getFirestore(app);
         const data = await fetchTracker(id);
         trackerId = id;
         if(data.settings)   state.settings   = data.settings;
-        if(data.catBudgets) state.catBudgets = data.catBudgets;
-        if(data.expenses)   state.expenses   = data.expenses;
-        if(data.fund)       state.fund       = data.fund;
+        if(data.catBudgets){
+          const cb=data.catBudgets;
+          state.catBudgets=Array.isArray(cb)?cb:[{...cb},{...cb}];
+        }
+        if(data.expenses)    state.expenses    = data.expenses;
+        if(data.fund)        state.fund        = data.fund;
+        if(data.fundHistory) state.fundHistory = data.fundHistory;
         setHash(trackerId);
         await syncAutoFund();
         listenToTracker(trackerId);
@@ -822,6 +839,31 @@ const db = getFirestore(app);
       </div>
 
       <div class="jf-card" style="grid-column:1/-1;">
+        <h2>Start a new milestone</h2>
+        <p style="font-size:12.5px;color:var(--text-soft);margin:0 0 12px;line-height:1.6;">
+          Reached ${ml}? Reset the fund to $0 and start saving for the next one. Your current total (${fmtShort(total)}) is saved under Past milestones.
+        </p>
+        <div class="jf-form">
+          <div class="jf-field"><label>Next milestone name</label><input type="text" id="jf-reset-label" placeholder="e.g. Bali"></div>
+          <div class="jf-field"><label>Next milestone date</label><input type="date" id="jf-reset-date"></div>
+          <div class="full"><button class="jf-btn jf-btn-danger" id="jf-reset-fund" style="width:100%;">Reset fund &amp; start new milestone</button></div>
+        </div>
+      </div>
+
+      ${state.fundHistory.length?`
+      <div class="jf-card" style="grid-column:1/-1;">
+        <h2>Past milestones</h2>
+        ${state.fundHistory.slice().reverse().map(h=>`
+          <div class="jf-tx">
+            <div class="jf-tx-left"><div>
+              <div>${h.label}</div>
+              <div class="jf-tx-meta">Closed ${new Date(h.closedOn+'T00:00:00').toLocaleDateString(undefined,{day:'numeric',month:'short',year:'numeric'})}</div>
+            </div></div>
+            <span class="jf-tx-amt pos">${fmt(h.total)}</span>
+          </div>`).join('')}
+      </div>`:''}
+
+      <div class="jf-card" style="grid-column:1/-1;">
         <h2>Contribution history</h2>
         ${sorted.length===0?'<p class="jf-empty">No completed-month rollovers or earlier contributions yet.</p>':
           sorted.map(f=>`
@@ -914,6 +956,33 @@ const db = getFirestore(app);
     root.querySelectorAll('.jf-tx-del-fund').forEach(btn=>{
       btn.onclick=async()=>{ state.fund=state.fund.filter(f=>f.id!==btn.dataset.id); await saveFund(); };
     });
+
+    const resetFundBtn=document.getElementById('jf-reset-fund');
+    if(resetFundBtn) resetFundBtn.onclick=async()=>{
+      const newLabel=document.getElementById('jf-reset-label').value.trim();
+      const newDate=document.getElementById('jf-reset-date').value;
+      if(!newLabel||!newDate){ alert('Enter a name and date for the next milestone.'); return; }
+      const total=fundTotal();
+      if(!confirm(`Reset the ${state.settings.milestoneLabel||'Milestone'} fund (${fmtShort(total)}) and start saving for ${newLabel}?`)) return;
+
+      state.fundHistory.push({
+        id:Date.now()+'-'+Math.random().toString(36).slice(2,7),
+        label:state.settings.milestoneLabel||'Milestone',
+        tripDate:state.settings.tripDate,
+        total,
+        closedOn:new Date().toISOString().slice(0,10),
+      });
+      state.fund=[];
+      state.settings={
+        ...state.settings,
+        milestoneLabel:newLabel,
+        tripDate:newDate,
+        autoFundStartMonth:monthKey(new Date()),
+      };
+      await syncAutoFund();
+      await saveFund();
+      render();
+    };
 
     const saveNames=document.getElementById('jf-save-names');
     if(saveNames) saveNames.onclick=async()=>{
