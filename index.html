@@ -118,6 +118,14 @@
   .jf-tx-del:hover{color:var(--warn);}
   .jf-tx-del-fund{background:none;border:none;color:var(--text-faint);cursor:pointer;font-size:15px;padding:2px 6px;}
   .jf-tx-del-fund:hover{color:var(--warn);}
+  .jf-tx-del-inc{background:none;border:none;color:var(--text-faint);cursor:pointer;font-size:15px;padding:2px 6px;}
+  .jf-tx-del-inc:hover{color:var(--warn);}
+  .jf-earn-row{margin-top:10px;}
+  .jf-earn-lbl{display:flex;justify-content:space-between;font-size:11.5px;color:var(--text-soft);margin-bottom:4px;}
+  .jf-earn-lbl b{font-family:'JetBrains Mono',monospace;font-weight:500;color:var(--text);}
+  .jf-net{font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:700;margin-top:2px;}
+  .jf-net.pos{color:var(--accent);}
+  .jf-net.neg{color:var(--warn);}
   .jf-monthnav{display:flex;align-items:center;gap:8px;margin-bottom:16px;}
   .jf-monthnav button{background:var(--surface-2);border:1px solid var(--border);color:var(--text);border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:14px;}
   .jf-monthnav select{font-family:'Inter',sans-serif;font-weight:600;font-size:13px;border:1px solid var(--border);border-radius:9px;padding:7px 10px;background:var(--surface-2);color:var(--text);}
@@ -241,6 +249,8 @@ const db = getFirestore(app);
     catBudgets: [{...DEFAULT_CAT_BUDGETS},{...DEFAULT_CAT_BUDGETS}],
     expenses: [], fund: [],
     fundHistory: [],
+    income: [],
+    incPerson:0,
     person:0, tab:'overview',
     viewMonth: monthKey(new Date()),
   };
@@ -261,7 +271,8 @@ const db = getFirestore(app);
       catBudgets:state.catBudgets,
       expenses:state.expenses,
       fund:state.fund,
-      fundHistory:state.fundHistory
+      fundHistory:state.fundHistory,
+      income:state.income
     };
   }
 
@@ -317,6 +328,7 @@ const db = getFirestore(app);
       if(data.expenses)    state.expenses    = data.expenses;
       if(data.fund)        state.fund        = data.fund;
       if(data.fundHistory) state.fundHistory = data.fundHistory;
+      if(data.income)      state.income      = data.income;
       await syncAutoFund();
       render();
     });
@@ -334,12 +346,14 @@ const db = getFirestore(app);
     try{ await window.storage.set('expenses',    JSON.stringify(state.expenses),    true); }catch(e){}
     try{ await window.storage.set('fund',        JSON.stringify(state.fund),        true); }catch(e){}
     try{ await window.storage.set('fundHistory', JSON.stringify(state.fundHistory), true); }catch(e){}
+    try{ await window.storage.set('income',      JSON.stringify(state.income),      true); }catch(e){}
   }
 
   async function saveSettings()   { scheduleSave(); }
   async function saveCatBudgets() { scheduleSave(); }
   async function saveExpenses()   { scheduleSave(); }
   async function saveFund()       { scheduleSave(); }
+  async function saveIncome()     { scheduleSave(); }
 
   async function loadAll(){
     const root = document.getElementById('jf-root');
@@ -357,6 +371,7 @@ const db = getFirestore(app);
       try{ const ex=await window.storage.get('expenses',true);  if(ex&&ex.value) state.expenses=JSON.parse(ex.value); }catch(e){}
       try{ const fd=await window.storage.get('fund',true);      if(fd&&fd.value) state.fund=JSON.parse(fd.value); }catch(e){}
       try{ const fh=await window.storage.get('fundHistory',true); if(fh&&fh.value) state.fundHistory=JSON.parse(fh.value); }catch(e){}
+      try{ const inc=await window.storage.get('income',true); if(inc&&inc.value) state.income=JSON.parse(inc.value); }catch(e){}
       await syncAutoFund();
       render(); return;
     }
@@ -374,6 +389,7 @@ const db = getFirestore(app);
         if(data.expenses)    state.expenses    = data.expenses;
         if(data.fund)        state.fund        = data.fund;
         if(data.fundHistory) state.fundHistory = data.fundHistory;
+      if(data.income)      state.income      = data.income;
         setHash(trackerId);
         await syncAutoFund();
         listenToTracker(trackerId);
@@ -449,6 +465,7 @@ const db = getFirestore(app);
         if(data.expenses)    state.expenses    = data.expenses;
         if(data.fund)        state.fund        = data.fund;
         if(data.fundHistory) state.fundHistory = data.fundHistory;
+      if(data.income)      state.income      = data.income;
         setHash(trackerId);
         await syncAutoFund();
         listenToTracker(trackerId);
@@ -462,8 +479,11 @@ const db = getFirestore(app);
   }
 
   function expensesForMonth(mk){ return state.expenses.filter(e=>e.date.slice(0,7)===mk); }
+  function incomeForMonth(mk){ return state.income.filter(e=>e.date.slice(0,7)===mk); }
+  function fmtSigned(n){ return (n<0?'-':'')+fmtShort(Math.abs(n)); }
   function availableMonths(){
     const set=new Set(state.expenses.map(e=>e.date.slice(0,7)));
+    state.income.forEach(e=>set.add(e.date.slice(0,7)));
     set.add(state.viewMonth); set.add(monthKey(new Date()));
     return Array.from(set).sort();
   }
@@ -588,6 +608,7 @@ const db = getFirestore(app);
         <div class="jf-tabs">
           ${tabBtn('overview','Overview')}
           ${tabBtn('spending','Spending')}
+          ${tabBtn('earnings','Earnings')}
           ${tabBtn('budgets','Budgets')}
           ${tabBtn('fund',`${state.settings.milestoneLabel||'Trip'} Fund`)}
           ${tabBtn('settings','Settings')}
@@ -602,6 +623,7 @@ const db = getFirestore(app);
     const content=document.getElementById('jf-tabcontent');
     if(state.tab==='overview')      content.innerHTML=renderOverview(names);
     else if(state.tab==='spending') content.innerHTML=renderSpending(names);
+    else if(state.tab==='earnings') content.innerHTML=renderEarnings(names);
     else if(state.tab==='budgets')  content.innerHTML=renderBudgets();
     else if(state.tab==='fund')     content.innerHTML=renderFund(names);
     else                            content.innerHTML=renderSettings(names);
@@ -736,6 +758,105 @@ const db = getFirestore(app);
                 <div style="display:flex;align-items:center;gap:6px;">
                   <span class="jf-tx-amt">${fmt(e.amount)}</span>
                   <button class="jf-tx-del" data-id="${e.id}">&times;</button>
+                </div>
+              </div>
+            `).join('')}
+        </div>
+      </div>`;
+  }
+
+  function renderEarnings(names){
+    const months=availableMonths();
+    const mk=state.viewMonth;
+    const monthExp=expensesForMonth(mk);
+    const monthInc=incomeForMonth(mk);
+    const earned=[0,1].map(i=>monthInc.filter(e=>e.person===i).reduce((s,e)=>s+e.amount,0));
+    const spent=[0,1].map(i=>monthExp.filter(e=>e.person===i).reduce((s,e)=>s+e.amount,0));
+    const net=[0,1].map(i=>earned[i]-spent[i]);
+    const totalEarned=earned[0]+earned[1];
+    const totalSpent=spent[0]+spent[1];
+    const totalNet=totalEarned-totalSpent;
+    const keptPct=totalEarned>0?Math.round((totalNet/totalEarned)*100):null;
+    const maxAll=Math.max(totalEarned,totalSpent,1);
+    const allEarned=state.income.reduce((s,e)=>s+e.amount,0);
+    const allSpent=state.expenses.reduce((s,e)=>s+e.amount,0);
+
+    function personCard(i){
+      const mx=Math.max(earned[i],spent[i],1);
+      return `<div class="jf-card">
+        <h2>${names[i]} <span class="tag">${monthLabel(mk)}</span></h2>
+        <div class="jf-lbl-net" style="font-size:11px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.05em;font-weight:600;">Net (earned − spent)</div>
+        <div class="jf-net ${net[i]>=0?'pos':'neg'}">${net[i]>=0?'+':''}${fmtSigned(net[i])}</div>
+        <div class="jf-earn-row">
+          <div class="jf-earn-lbl"><span>Earned</span><b>${fmtShort(earned[i])}</b></div>
+          <div class="jf-vs-bar-track"><div class="jf-vs-bar-fill" style="width:${(earned[i]/mx)*100}%;background:var(--accent)"></div></div>
+        </div>
+        <div class="jf-earn-row">
+          <div class="jf-earn-lbl"><span>Spent</span><b>${fmtShort(spent[i])}</b></div>
+          <div class="jf-vs-bar-track"><div class="jf-vs-bar-fill" style="width:${(spent[i]/mx)*100}%;background:var(--warn)"></div></div>
+        </div>
+      </div>`;
+    }
+
+    return `
+      <div class="jf-monthnav">
+        <button id="jf-prevmonth">&larr;</button>
+        <select id="jf-month">${months.map(m=>`<option value="${m}" ${m===mk?'selected':''}>${monthLabel(m)}</option>`).join('')}</select>
+        <button id="jf-nextmonth">&rarr;</button>
+      </div>
+      <div class="jf-grid">
+        <div class="jf-card" style="grid-column:1/-1;">
+          <h2>Earned vs spent <span class="tag">${monthLabel(mk)} · combined</span></h2>
+          <div class="jf-vs">
+            <div class="jf-vs-person"><div class="jf-vs-name">Earned</div><div class="jf-vs-amt" style="color:var(--accent)">${fmtShort(totalEarned)}</div></div>
+            <div class="jf-vs-person"><div class="jf-vs-name">Spent</div><div class="jf-vs-amt" style="color:var(--warn)">${fmtShort(totalSpent)}</div></div>
+            <div class="jf-vs-person ${totalNet>=0?'lead':''}"><div class="jf-vs-name">Net</div><div class="jf-vs-amt" style="color:${totalNet>=0?'var(--accent)':'var(--warn)'}">${totalNet>=0?'+':''}${fmtSigned(totalNet)}</div></div>
+          </div>
+          <div class="jf-earn-row">
+            <div class="jf-earn-lbl"><span>Earned</span><b>${fmtShort(totalEarned)}</b></div>
+            <div class="jf-vs-bar-track"><div class="jf-vs-bar-fill" style="width:${(totalEarned/maxAll)*100}%;background:var(--accent)"></div></div>
+          </div>
+          <div class="jf-earn-row">
+            <div class="jf-earn-lbl"><span>Spent</span><b>${fmtShort(totalSpent)}</b></div>
+            <div class="jf-vs-bar-track"><div class="jf-vs-bar-fill" style="width:${(totalSpent/maxAll)*100}%;background:var(--warn)"></div></div>
+          </div>
+          <div class="jf-streak-row">
+            <span class="jf-streak-pill">${keptPct===null?'No earnings logged yet':`Kept this month: <b>${keptPct}%</b> of earnings`}</span>
+            <span class="jf-streak-pill">All time: <b>${fmtShort(allEarned)}</b> earned · <b>${fmtShort(allSpent)}</b> spent · <b>${fmtSigned(allEarned-allSpent)}</b> net</span>
+          </div>
+        </div>
+        ${personCard(0)}
+        ${personCard(1)}
+        <div class="jf-card" style="grid-column:1/-1;">
+          <h2>Add earnings</h2>
+          <div class="jf-form">
+            <div class="jf-field full"><label>Who earned it</label>
+              <div class="jf-toggle">
+                <button type="button" id="jf-ip0" class="${state.incPerson===0?'active':''}">${names[0]}</button>
+                <button type="button" id="jf-ip1" class="${state.incPerson===1?'active':''}">${names[1]}</button>
+              </div>
+            </div>
+            <div class="jf-field"><label>Amount (AUD)</label><input type="number" id="jf-inc-amt" min="0" step="0.01" placeholder="0.00"></div>
+            <div class="jf-field"><label>Date</label><input type="date" id="jf-inc-date" value="${new Date().toISOString().slice(0,10)}"></div>
+            <div class="jf-field full"><label>Source (optional)</label><input type="text" id="jf-inc-note" placeholder="e.g. Pay from work, birthday money"></div>
+            <div class="full" style="margin-top:4px;"><button class="jf-btn jf-btn-primary" id="jf-inc-add">Add earnings</button></div>
+          </div>
+        </div>
+        <div class="jf-card" style="grid-column:1/-1;">
+          <h2>Earnings <span class="tag">${monthLabel(mk)}</span></h2>
+          ${monthInc.length===0?'<p class="jf-empty">No earnings logged this month yet.</p>':
+            monthInc.slice().sort((a,b)=>b.date.localeCompare(a.date)).map(e=>`
+              <div class="jf-tx">
+                <div class="jf-tx-left">
+                  <span class="jf-dot" style="background:var(--accent)"></span>
+                  <div>
+                    <div>${e.note?e.note:'Earnings'}</div>
+                    <div class="jf-tx-meta">${names[e.person]} · ${new Date(e.date+'T00:00:00').toLocaleDateString(undefined,{day:'numeric',month:'short'})}</div>
+                  </div>
+                </div>
+                <div style="display:flex;align-items:center;gap:6px;">
+                  <span class="jf-tx-amt pos">+${fmt(e.amount)}</span>
+                  <button class="jf-tx-del-inc" data-id="${e.id}">&times;</button>
                 </div>
               </div>
             `).join('')}
@@ -983,6 +1104,27 @@ const db = getFirestore(app);
       await saveFund();
       render();
     };
+
+    const ip0=document.getElementById('jf-ip0'); if(ip0) ip0.onclick=()=>{ state.incPerson=0; render(); };
+    const ip1=document.getElementById('jf-ip1'); if(ip1) ip1.onclick=()=>{ state.incPerson=1; render(); };
+    const incAdd=document.getElementById('jf-inc-add');
+    if(incAdd) incAdd.onclick=async()=>{
+      const amt=parseFloat(document.getElementById('jf-inc-amt').value);
+      if(!amt||amt<=0){ document.getElementById('jf-inc-amt').focus(); return; }
+      const date=document.getElementById('jf-inc-date').value||new Date().toISOString().slice(0,10);
+      const note=document.getElementById('jf-inc-note').value.trim();
+      state.income.push({id:Date.now()+'-'+Math.random().toString(36).slice(2,7),amount:amt,date,note,person:state.incPerson});
+      state.viewMonth=date.slice(0,7);
+      await saveIncome();
+      render();
+    };
+    root.querySelectorAll('.jf-tx-del-inc').forEach(btn=>{
+      btn.onclick=async()=>{
+        state.income=state.income.filter(e=>e.id!==btn.dataset.id);
+        await saveIncome();
+        render();
+      };
+    });
 
     const saveNames=document.getElementById('jf-save-names');
     if(saveNames) saveNames.onclick=async()=>{
